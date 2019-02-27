@@ -1,5 +1,5 @@
 fork from https://github.com/fw42/go-hpfeeds
 
-change tcp connect to tls connect
+add tls connect support
 
 this is a temp project
