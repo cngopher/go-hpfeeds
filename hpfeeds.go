@@ -6,6 +6,7 @@ package hpfeeds
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -38,7 +39,7 @@ const (
 type Hpfeeds struct {
 	LocalAddr net.TCPAddr
 
-	conn  *net.TCPConn
+	conn  *tls.Conn
 	host  string
 	port  int
 	ident string
@@ -66,17 +67,15 @@ func NewHpfeeds(host string, port int, ident string, auth string) Hpfeeds {
 	}
 }
 
-// Connect establishes a new hpfeeds connection and will block until the
+// TLSConnect establishes a new hpfeeds connection and will block until the
 // connection is successfully estabilshed or the connection attempt failed.
 func (hp *Hpfeeds) Connect() error {
 	hp.clearDisconnected()
 
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port))
-	if err != nil {
-		return err
+	conf := &tls.Config{
+		InsecureSkipVerify: true,
 	}
-
-	conn, err := net.DialTCP("tcp", &hp.LocalAddr, addr)
+	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port), conf)
 	if err != nil {
 		return err
 	}
