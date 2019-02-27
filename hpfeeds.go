@@ -26,11 +26,11 @@ type rawMsgHeader struct {
 }
 
 const (
-	opcode_err  = 0
-	opcode_info = 1
-	opcode_auth = 2
-	opcode_pub  = 3
-	opcode_sub  = 4
+	opcodeErr  = 0
+	opcodeInfo = 1
+	opcodeAuth = 2
+	opcodePub  = 3
+	opcodeSub  = 4
 )
 
 // Hpfeeds stores internal state for one hpfeeds connection. On disconnection,
@@ -39,11 +39,13 @@ const (
 type Hpfeeds struct {
 	LocalAddr net.TCPAddr
 
-	conn  *tls.Conn
-	host  string
-	port  int
-	ident string
-	auth  string
+	tlsconn *tls.Conn
+	tcpconn *net.TCPConn
+	host    string
+	port    int
+	ident   string
+	auth    string
+	usetls  bool
 
 	authSent     chan bool
 	Disconnected chan error
@@ -53,12 +55,14 @@ type Hpfeeds struct {
 	Log bool
 }
 
-func NewHpfeeds(host string, port int, ident string, auth string) Hpfeeds {
+//NewHpfeeds NewHpfeeds
+func NewHpfeeds(host string, port int, ident string, auth string, usetls bool) Hpfeeds {
 	return Hpfeeds{
-		host:  host,
-		port:  port,
-		ident: ident,
-		auth:  auth,
+		host:   host,
+		port:   port,
+		ident:  ident,
+		auth:   auth,
+		usetls: usetls,
 
 		authSent:     make(chan bool),
 		Disconnected: make(chan error, 1),
@@ -67,20 +71,34 @@ func NewHpfeeds(host string, port int, ident string, auth string) Hpfeeds {
 	}
 }
 
-// TLSConnect establishes a new hpfeeds connection and will block until the
+// Connect establishes a new hpfeeds connection and will block until the
 // connection is successfully estabilshed or the connection attempt failed.
-func (hp *Hpfeeds) Connect() error {
+func (hp *Hpfeeds) Connect() (err error) {
 	hp.clearDisconnected()
 
-	conf := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port), conf)
-	if err != nil {
-		return err
+	if hp.usetls {
+		conf := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port), conf)
+		if err != nil {
+			return err
+		}
+		hp.tlsconn = conn
+	} else {
+		addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", hp.host, hp.port))
+		if err != nil {
+			return err
+		}
+
+		conn, err := net.DialTCP("tcp", &hp.LocalAddr, addr)
+		if err != nil {
+			return err
+		}
+		hp.tcpconn = conn
+
 	}
 
-	hp.conn = conn
 	go hp.recvLoop()
 	<-hp.authSent
 
@@ -111,28 +129,48 @@ func (hp *Hpfeeds) Close() {
 }
 
 func (hp *Hpfeeds) close(err error) {
-	hp.conn.Close()
+	if hp.usetls {
+		hp.tlsconn.Close()
+	} else {
+		hp.tcpconn.Close()
+	}
+
 	hp.setDisconnected(err)
 	select {
 	case hp.authSent <- false:
 	default:
 	}
-	hp.conn = nil
+
+	if hp.usetls {
+		hp.tlsconn = nil
+	} else {
+		hp.tcpconn = nil
+	}
 }
 
 func (hp *Hpfeeds) recvLoop() {
 	buf := []byte{}
-	for hp.conn != nil {
+
+	for hp.tcpconn != nil || hp.tlsconn != nil {
 		readbuf := make([]byte, 1024)
 
-		n, err := hp.conn.Read(readbuf)
-		if err != nil {
-			hp.log("Read(): %s\n", err)
-			hp.close(err)
-			return
+		if hp.usetls {
+			n, err := hp.tlsconn.Read(readbuf)
+			if err != nil {
+				hp.log("Read(): %s\n", err)
+				hp.close(err)
+				return
+			}
+			buf = append(buf, readbuf[:n]...)
+		} else {
+			n, err := hp.tcpconn.Read(readbuf)
+			if err != nil {
+				hp.log("Read(): %s\n", err)
+				hp.close(err)
+				return
+			}
+			buf = append(buf, readbuf[:n]...)
 		}
-
-		buf = append(buf, readbuf[:n]...)
 
 		for len(buf) > 5 {
 			hdr := rawMsgHeader{}
@@ -150,12 +188,12 @@ func (hp *Hpfeeds) recvLoop() {
 
 func (hp *Hpfeeds) parse(opcode uint8, data []byte) {
 	switch opcode {
-	case opcode_info:
+	case opcodeInfo:
 		hp.sendAuth(data[(1 + uint8(data[0])):])
 		hp.authSent <- true
-	case opcode_err:
+	case opcodeErr:
 		hp.log("Received error from server: %s\n", string(data))
-	case opcode_pub:
+	case opcodePub:
 		len1 := uint8(data[0])
 		name := string(data[1:(1 + len1)])
 		len2 := uint8(data[1+len1])
@@ -187,13 +225,23 @@ func (hp *Hpfeeds) sendRawMsg(opcode uint8, data []byte) {
 	buf[4] = byte(opcode)
 	buf = append(buf, data...)
 	for len(buf) > 0 {
-		n, err := hp.conn.Write(buf)
-		if err != nil {
-			hp.log("Write(): %s\n", err)
-			hp.close(err)
-			return
+		if hp.usetls {
+			n, err := hp.tlsconn.Write(buf)
+			if err != nil {
+				hp.log("Write(): %s\n", err)
+				hp.close(err)
+				return
+			}
+			buf = buf[n:]
+		} else {
+			n, err := hp.tcpconn.Write(buf)
+			if err != nil {
+				hp.log("Write(): %s\n", err)
+				hp.close(err)
+				return
+			}
+			buf = buf[n:]
 		}
-		buf = buf[n:]
 	}
 }
 
@@ -204,14 +252,14 @@ func (hp *Hpfeeds) sendAuth(nonce []byte) {
 	mac.Write([]byte(hp.auth))
 	writeField(buf, []byte(hp.ident))
 	buf.Write(mac.Sum(nil))
-	hp.sendRawMsg(opcode_auth, buf.Bytes())
+	hp.sendRawMsg(opcodeAuth, buf.Bytes())
 }
 
 func (hp *Hpfeeds) sendSub(channelName string) {
 	buf := new(bytes.Buffer)
 	writeField(buf, []byte(hp.ident))
 	buf.Write([]byte(channelName))
-	hp.sendRawMsg(opcode_sub, buf.Bytes())
+	hp.sendRawMsg(opcodeSub, buf.Bytes())
 }
 
 func (hp *Hpfeeds) sendPub(channelName string, payload []byte) {
@@ -219,7 +267,7 @@ func (hp *Hpfeeds) sendPub(channelName string, payload []byte) {
 	writeField(buf, []byte(hp.ident))
 	writeField(buf, []byte(channelName))
 	buf.Write(payload)
-	hp.sendRawMsg(opcode_pub, buf.Bytes())
+	hp.sendRawMsg(opcodePub, buf.Bytes())
 }
 
 // Subscribe sends a subscribe message to the hpfeeds server. All incoming
@@ -236,7 +284,7 @@ func (hp *Hpfeeds) Subscribe(channelName string, channel chan Message) {
 func (hp *Hpfeeds) Publish(channelName string, channel chan []byte) {
 	go func() {
 		for payload := range channel {
-			if hp.conn == nil {
+			if hp.tcpconn == nil && hp.tlsconn == nil {
 				return
 			}
 			hp.sendPub(channelName, payload)
