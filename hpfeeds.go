@@ -129,9 +129,9 @@ func (hp *Hpfeeds) Close() {
 }
 
 func (hp *Hpfeeds) close(err error) {
-	if hp.usetls {
+	if hp.usetls && hp.tlsconn != nil {
 		hp.tlsconn.Close()
-	} else {
+	} else if !hp.usetls && hp.tcpconn != nil {
 		hp.tcpconn.Close()
 	}
 
