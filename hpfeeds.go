@@ -285,6 +285,7 @@ func (hp *Hpfeeds) Publish(channelName string, channel chan []byte) {
 	go func() {
 		for payload := range channel {
 			if hp.tcpconn == nil && hp.tlsconn == nil {
+				channel <- payload
 				return
 			}
 			hp.sendPub(channelName, payload)
